@@ -1,0 +1,18 @@
+{
+  "schedule_hour": "16",
+  "schedule_minute": "58",
+  "window_geometry": "675x855+342+342",
+  "last_run": null,
+  "custom_desktop_path": "",
+  "custom_keywords": [],
+  "custom_mini_program_path": "C:/Users/Home/Desktop/中南林业科技大学学生工作部.lnk",
+  "enable_wechat_notify": false,
+  "close_wechat_after_notify": false,
+  "wechat_post_action": "退出微信",
+  "log_expanded": true,
+  "power_original_settings": null,
+  "power_settings_captured": false,
+  "is_timer_enabled": false,
+  "grace_period_minutes": 30,
+  "enable_grace_checkin": false
+}
