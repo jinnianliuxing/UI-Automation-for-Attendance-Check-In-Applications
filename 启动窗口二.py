@@ -760,7 +760,7 @@ class AutoCheckInGUI:
     # 全局唯一标识符
     MUTEX_NAME = "Global\\AutoCheckIn_System_Mutex_2025" 
     # 窗口类名通常由 Tkinter 自动生成，但我们可以通过标题查找
-    WINDOW_TITLE = "某安自动打卡系统 by ᥬ💯ᩤ"
+    WINDOW_TITLE = "某安自动打卡系统1.1 by ᥬ💯ᩤ"
 
     def __init__(self):
         self.time_config_changed = False 
@@ -790,7 +790,7 @@ class AutoCheckInGUI:
         self.root.option_add("*Font", default_font)
         # 设置 LabelFrame 标题字体稍大一点
         self.root.option_add("*LabelFrame*Font", ("微软雅黑", scaled_font_size + 1, "bold"))
-        self.root.title("某安自动打卡系统 by ᥬ💯ᩤ")
+        self.root.title("某安自动打卡系统1.1 by ᥬ💯ᩤ")
         self.root.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
         self.root.resizable(True, True)
         
@@ -892,7 +892,7 @@ class AutoCheckInGUI:
             pystray.MenuItem('退出程序', self._on_closing_from_tray)
         )
         
-        self.tray_icon = pystray.Icon("AutoCheckIn", image, "某安自动打卡系统", menu, on_double_click_left=self._show_main_window)
+        self.tray_icon = pystray.Icon("AutoCheckIn", image, "某安自动打卡系统1.1", menu, on_double_click_left=self._show_main_window)
         
         if not hasattr(self, 'tray_thread') or not self.tray_thread.is_alive():
             self.tray_thread = threading.Thread(target=self.tray_icon.run, daemon=True)
@@ -1620,6 +1620,63 @@ class AutoCheckInGUI:
         # 7. 重置停止标志
         self.stop_timer_flag = False 
 
+    def _wait_for_desktop_ready(self, timeout=15):
+        """
+        等待桌面完全就绪（极致稳定版）。
+        策略：
+        1. 复用 unlock_module.is_lock_screen_active() 确保锁屏判断标准绝对一致。
+        2. 确认 Explorer.exe 进程存在且稳定运行。
+        3. 给予额外的缓冲时间让桌面图标和任务栏渲染完毕。
+        """
+        import 亮屏进入桌面 as unlock_module
+        
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            # 1. 响应用户的中断请求
+            if self.stop_timer_flag:
+                return False
+                
+            # 2. 检查是否还处在锁屏/登录界面 (复用统一接口)
+            try:
+                if unlock_module.is_lock_screen_active():
+                    # 如果还在锁屏，短暂等待后继续循环检测
+                    time.sleep(0.5)
+                    continue
+            except Exception as e:
+                # 防止检测函数本身报错导致流程中断，记录日志并继续尝试
+                self._log(f"[桌面检测] 锁屏状态检测异常: {e}")
+                time.sleep(0.5)
+                continue
+
+            # 3. 检查 Explorer 进程是否存在 (桌面资源管理器就绪的核心标志)
+            try:
+                # 使用 tasklist 快速检查 explorer.exe
+                # creationflags=0x08000000 隐藏黑框
+                result = subprocess.run(
+                    ["tasklist", "/FI", "IMAGENAME eq explorer.exe", "/NH", "/FO", "CSV"],
+                    capture_output=True, 
+                    text=True, 
+                    creationflags=0x08000000
+                )
+                
+                # 检查输出中是否包含 explorer.exe
+                if "explorer.exe" in result.stdout.lower():
+                    # ✅ 关键优化：Explorer 存在后，再额外等待 0.5~1.0 秒
+                    # 这能确保桌面图标、任务栏、系统托盘完全加载完毕，
+                    # 防止小程序启动时因为桌面UI未渲染完成而获取焦点失败。
+                    time.sleep(0.8) 
+                    return True
+            except Exception as e:
+                self._log(f"[桌面检测] Explorer进程检测异常: {e}")
+                pass
+            
+            # 每次循环间隔，避免CPU占用过高
+            time.sleep(0.5)
+            
+        # 超时仍未就绪
+        return False
+
     def _run_checkin(self, is_timer_task=False, restore_power_after=True):
         try:
             if self.stop_timer_flag or self.is_closing:
@@ -1649,9 +1706,19 @@ class AutoCheckInGUI:
                                 break
                     else:
                         unlock_module.activate_desktop()
+                    # ==================== 【核心修复】新增：等待桌面完全就绪 ====================
+                    self._log("[系统] 亮屏指令已发送，正在等待桌面完全就绪...")
+                    if not self._wait_for_desktop_ready(timeout=15):
+                        self._log("[警告] 等待桌面就绪超时，可能导致后续操作失败")
+                    else:
+                        self._log("[系统] 桌面已就绪，开始执行打卡")
+                    # ========================================================================
+
                     self._log("[系统] 亮屏解锁完成")
                 except Exception as e:
                     self._log(f"[系统] 亮屏模块异常: {e}")
+            
+
 
             enable_notify = "1" if self.enable_wechat_notify.get() else "0"
             close_wechat = "0"
