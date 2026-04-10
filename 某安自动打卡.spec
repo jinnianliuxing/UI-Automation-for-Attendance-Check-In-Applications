@@ -1,12 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_all
+
+datas = []
+binaries = []
+hiddenimports = ['uiautomation', 'win32com', 'win32api', 'win32con', 'win32event', 'win32gui', 'win32process', 'PIL', 'PIL.Image', 'PIL.ImageDraw', 'pystray', '亮屏进入桌面', '打卡并发消息']
+tmp_ret = collect_all('uiautomation')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
     ['启动窗口二.py'],
     pathex=[],
-    binaries=[],
-    datas=[],
-    hiddenimports=['uiautomation', 'win32com', 'win32api', 'win32con', 'win32event', 'win32gui', 'PIL', '亮屏进入桌面', '打卡并发消息'],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

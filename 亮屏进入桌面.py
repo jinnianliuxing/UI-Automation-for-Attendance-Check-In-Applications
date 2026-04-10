@@ -103,7 +103,7 @@ def activate_desktop():
         send_key(VK_MENU, press=True)
         time.sleep(0.05)
         send_key(VK_MENU, press=False)
-        time.sleep(0.1)
+        time.sleep(0.4)
         return True
     return False
 

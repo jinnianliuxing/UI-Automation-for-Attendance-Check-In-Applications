@@ -1,7 +1,7 @@
 {
-  "schedule_hour": "21",
-  "schedule_minute": "35",
-  "window_geometry": "675x855+152+152",
+  "schedule_hour": "00",
+  "schedule_minute": "32",
+  "window_geometry": "675x855+76+76",
   "last_run": null,
   "custom_desktop_path": "",
   "custom_keywords": [],

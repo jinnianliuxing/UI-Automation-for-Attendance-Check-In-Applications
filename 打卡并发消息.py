@@ -10,6 +10,8 @@ import threading
 import pythoncom
 import json
 import sys
+import ctypes
+from ctypes import wintypes
 
 # 在文件顶部定义全局变量
 LOG_CALLBACK = None
@@ -438,15 +440,11 @@ def check_and_login_wechat():
             log("[微信] 已登录", force=True)
             return True
         
-        # 2. ✅ 优化：分段等待登录窗口出现 (原 timeout=15)
-        # 最多等待 15 秒，每 0.5 秒检查一次中断
+        # 2. 监听登录窗口出现
         log("[微信] 未检测到主窗口，正在监听登录窗口...", force=True)
         login_appeared = False
         for i in range(10): 
-            if is_interrupted():
-                return False # 被终止则直接返回
-            
-            # 尝试查找登录窗口或主窗口
+            if is_interrupted(): return False
             if login_window.Exists(maxSearchSeconds=0.5) or main_window.Exists(maxSearchSeconds=0.5):
                 login_appeared = True
                 break
@@ -457,11 +455,8 @@ def check_and_login_wechat():
             wechat_path = get_wechat_path()
             if wechat_path:
                 start_application(wechat_path)
-            
-            # 启动后再次分段等待
             for i in range(15):
-                if is_interrupted():
-                    return False
+                if is_interrupted(): return False
                 if login_window.Exists(maxSearchSeconds=0.5) or main_window.Exists(maxSearchSeconds=0.5):
                     login_appeared = True
                     break
@@ -474,10 +469,9 @@ def check_and_login_wechat():
              print("[错误] 微信启动失败或未响应")
              return False
         
-        # 3. 【核心修改】优先处理“我知道了”冲突弹窗
+        # 3. 处理冲突弹窗
         log("[微信] 检测到登录窗口，检查是否有冲突提示...", force=True)
         ok_btn = login_window.ButtonControl(Name="我知道了", ClassName="mmui::XOutlineButton", searchDepth=7)
-        
         if not ok_btn.Exists(maxSearchSeconds=2):
             ok_btn = find_control_by_partial_name(login_window, "我知道了", max_depth=7)
             
@@ -512,33 +506,53 @@ def check_and_login_wechat():
             except Exception as e:
                 log(f"[微信] 点击'进入微信'异常: {e}")
             
-            # ✅ 关键：点击后，立即等待 1 秒，让动画开始
             time.sleep(1.0)
             
             log("[微信] 等待登录窗口关闭及主窗口加载...", force=True)
-            for i in range(20): # 最多等待10秒
+            for i in range(20): 
                 if is_interrupted(): return False
                 
-                # 检查主窗口是否就绪
                 if main_window.Exists(maxSearchSeconds=0.5):
-                    # 双重确认：登录窗口必须不存在
                     if not login_window.Exists(maxSearchSeconds=0.5):
-                        # ✅ 关键：确认登录后，再等待 0.5 秒确保主窗口完全稳定
                         time.sleep(0.5)
                         log("[微信] 登录成功，主窗口已激活", force=True)
                         return True
                 
-                # 如果登录窗口还在，尝试强制关闭
+                # ✅ 【优化点】如果登录窗口还在，尝试更强力的关闭方式
                 if login_window.Exists(maxSearchSeconds=0.2):
                     try:
                         if i > 5: 
+                             # 方法 1: 尝试 UIA Close
                              lp = login_window.GetWindowPattern()
                              if lp: 
                                  lp.Close()
-                                 log("[微信] 强制关闭残留的登录窗口")
-                                 time.sleep(0.5) # 关闭后等待
-                    except:
-                        pass
+                                 log("[微信] 尝试 UIA 关闭登录窗口")
+                                 time.sleep(0.5)
+                                 if not login_window.Exists(maxSearchSeconds=0.5):
+                                     continue # 成功关闭
+                             
+                             # 方法 2: 如果 UIA 失败，使用 Win32 API 发送 WM_CLOSE
+                             hwnd = login_window.NativeWindowHandle
+                             if hwnd:
+                                 log("[微信] UIA 关闭失败，尝试发送 WM_CLOSE 消息...")
+                                 WM_CLOSE = 0x0010
+                                 ctypes.windll.user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+                                 time.sleep(0.5)
+                                 if not login_window.Exists(maxSearchSeconds=0.5):
+                                     continue # 成功关闭
+                                 
+                             # 方法 3: 如果还不行，尝试模拟 Alt+F4
+                             log("[微信] 发送 Alt+F4 强制关闭...")
+                             unlock_module = __import__('亮屏进入桌面')
+                             unlock_module.send_key(0x12, True) # Alt Down
+                             unlock_module.send_key(0x73, True) # F4 Down
+                             time.sleep(0.1)
+                             unlock_module.send_key(0x73, False) # F4 Up
+                             unlock_module.send_key(0x12, False) # Alt Up
+                             time.sleep(0.5)
+                             
+                    except Exception as e:
+                        log(f"[微信] 关闭登录窗口异常: {e}")
                 
                 time.sleep(0.5)
             
@@ -556,34 +570,27 @@ def check_and_login_wechat():
             while time.time() - start_wait < 120:
                 if is_interrupted(): return False 
                 
-                # 1. 优先检查主窗口是否出现
                 if main_window.Exists(maxSearchSeconds=1):
-                    # 2. 关键：确认登录窗口/二维码窗口是否已消失
-                    # 有时候主窗口出来了，但登录遮罩层还没退下去
                     if not login_window.Exists(maxSearchSeconds=0.5):
                         log("[微信] 扫码登录成功，主窗口已激活且登录窗已关闭", force=True)
                         scan_success = True
                         break
                     else:
-                        # 如果主窗口在，但登录窗也在，尝试强制关闭登录窗
+                        # ✅ 【优化点】扫码界面也适用同样的强力关闭逻辑
                         log("[微信] 主窗口已现，但登录窗未退，尝试强制关闭...", force=True)
-                        try:
-                            lp = login_window.GetWindowPattern()
-                            if lp: lp.Close()
+                        hwnd = login_window.NativeWindowHandle
+                        if hwnd:
+                            WM_CLOSE = 0x0010
+                            ctypes.windll.user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
                             time.sleep(0.5)
-                            # 再次检查
                             if not login_window.Exists(maxSearchSeconds=0.5):
                                 log("[微信] 强制关闭登录窗成功", force=True)
                                 scan_success = True
                                 break
-                        except:
-                            pass
                 
                 time.sleep(1)
             
             if scan_success:
-                # ✅ 关键：扫码成功后，给予额外的稳固时间
-                # 微信在扫码登录后会有大量的数据同步和界面渲染，此时非常脆弱
                 time.sleep(1.5) 
                 return True
             else:
@@ -1187,11 +1194,44 @@ def run_full_checkin_task(enable_notify_str="0", close_wechat_str="1"):
 
                     log("[窗口] 小程序已出现，执行置顶...")
                     time.sleep(0.3)
+                    
                     # ✅ 优化：置顶重试次数减少，速度加快
                     force_bring_to_top_retry(punch_window, retries=1) 
                     activate_window(punch_window)
-                    time.sleep(0.5) 
                     
+                    # ==================== 【核心修复】新增：强制激活焦点 ====================
+                    log("[窗口] 正在强制激活小程序焦点...")
+                    
+                    # 1. 再次强制置顶，确保它在最上层
+                    hwnd = punch_window.NativeWindowHandle
+                    if hwnd:
+                        # SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW
+                        ctypes.windll.user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0002 | 0x0001 | 0x0040)
+                        # 再次设置为前台窗口
+                        ctypes.windll.user32.SetForegroundWindow(hwnd)
+                    
+                    # 2. 关键：模拟一次微小的鼠标移动或点击，以“唤醒”窗口的输入响应
+                    # 有些小程序窗口需要真实的鼠标事件才能激活 UIA 树
+                    try:
+                        # 获取窗口中心坐标
+                        rect = punch_window.BoundingRectangle
+                        center_x = (rect.left + rect.right) // 2
+                        center_y = (rect.top + rect.bottom) // 2
+                        
+                        # 移动鼠标到窗口中心 (这会强制 Windows 将该窗口设为活动窗口)
+                        ctypes.windll.user32.SetCursorPos(center_x, center_y)
+                        time.sleep(0.2)
+                        
+                        # 可选：如果还是不稳定，可以取消下面这行的注释，模拟一次左键点击
+                        # send_mouse_click(center_x, center_y, button="left") 
+                        # time.sleep(0.2)
+                        
+                    except Exception as e:
+                        log(f"[窗口] 鼠标激活异常: {e}")
+
+                    time.sleep(0.8) # 给系统一点时间处理焦点切换和 UI 渲染
+                    # ========================================================================
+
                     success, should_retry = run_punch_task(punch_window)
                     punch_window = None
                     
