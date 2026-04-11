@@ -118,30 +118,35 @@ FOLD_RATIO = 0.65
 SCHEDULED_TASK_NAME = "自动平安打卡"
 
 # ==================== API 防睡眠工具类 ====================
+# ==================== API 防睡眠工具类 (增强版：屏幕常亮) ====================
 class ApiSleepPreventer:
     """
     基于 Windows API SetThreadExecutionState 的防睡眠工具。
-    策略：允许屏幕关闭，但禁止系统进入睡眠或休眠。
+    策略：禁止系统睡眠，并强制屏幕保持开启（防止进入锁屏界面）。
     """
     def __init__(self):
         self.ES_CONTINUOUS = 0x80000000
-        self.ES_SYSTEM_REQUIRED = 0x00000001  # 关键：阻止系统睡眠/休眠
-        # 注意：这里故意不包含 ES_DISPLAY_REQUIRED，所以屏幕可以正常关闭
+        self.ES_SYSTEM_REQUIRED = 0x00000001  # 阻止系统睡眠
+        self.ES_DISPLAY_REQUIRED = 0x00000002 # 阻止屏幕关闭/锁定
         self.is_preventing = False
 
-    def prevent(self):
-        """开启防睡眠（允许屏保/黑屏）"""
+    def prevent(self, keep_display_on=True):
+        """
+        开启防睡眠
+        :param keep_display_on: True=屏幕常亮(推荐用于自动打卡), False=仅防睡眠(允许黑屏)
+        """
         if not self.is_preventing:
-            # 只设置 SYSTEM_REQUIRED，不设置 DISPLAY_REQUIRED
-            ctypes.windll.kernel32.SetThreadExecutionState(
-                self.ES_CONTINUOUS | self.ES_SYSTEM_REQUIRED
-            )
+            flags = self.ES_CONTINUOUS | self.ES_SYSTEM_REQUIRED
+            if keep_display_on:
+                flags |= self.ES_DISPLAY_REQUIRED
+            
+            ctypes.windll.kernel32.SetThreadExecutionState(flags)
             self.is_preventing = True
             return True
         return False
 
     def allow(self):
-        """恢复系统自动睡眠"""
+        """恢复系统自动睡眠和屏幕关闭策略"""
         if self.is_preventing:
             ctypes.windll.kernel32.SetThreadExecutionState(self.ES_CONTINUOUS)
             self.is_preventing = False
@@ -760,7 +765,7 @@ class AutoCheckInGUI:
     # 全局唯一标识符
     MUTEX_NAME = "Global\\AutoCheckIn_System_Mutex_2025" 
     # 窗口类名通常由 Tkinter 自动生成，但我们可以通过标题查找
-    WINDOW_TITLE = "某安自动打卡系统1.1 by ᥬ💯ᩤ"
+    WINDOW_TITLE = "某安自动打卡系统1.2 by ᥬ💯ᩤ"
 
     def __init__(self):
         self.time_config_changed = False 
@@ -790,7 +795,7 @@ class AutoCheckInGUI:
         self.root.option_add("*Font", default_font)
         # 设置 LabelFrame 标题字体稍大一点
         self.root.option_add("*LabelFrame*Font", ("微软雅黑", scaled_font_size + 1, "bold"))
-        self.root.title("某安自动打卡系统1.1 by ᥬ💯ᩤ")
+        self.root.title("某安自动打卡系统1.2 by ᥬ💯ᩤ")
         self.root.geometry(f"{BASE_WIDTH}x{BASE_HEIGHT}")
         self.root.resizable(True, True)
         
@@ -892,7 +897,7 @@ class AutoCheckInGUI:
             pystray.MenuItem('退出程序', self._on_closing_from_tray)
         )
         
-        self.tray_icon = pystray.Icon("AutoCheckIn", image, "某安自动打卡系统1.1", menu, on_double_click_left=self._show_main_window)
+        self.tray_icon = pystray.Icon("AutoCheckIn", image, "某安自动打卡系统1.2", menu, on_double_click_left=self._show_main_window)
         
         if not hasattr(self, 'tray_thread') or not self.tray_thread.is_alive():
             self.tray_thread = threading.Thread(target=self.tray_icon.run, daemon=True)
@@ -1142,8 +1147,8 @@ class AutoCheckInGUI:
             self.btn_timer_toggle.config(text="停止定时", bg="#ff4848", fg="white")
             self.is_timer_running = True 
             
-            if self.api_sleep_preventer.prevent():
-                self._log("[电源] ✅ API 防睡眠已自动启用")
+            if self.api_sleep_preventer.prevent(keep_display_on=True):
+                self._log("[电源] ✅ API 防睡眠及屏幕常亮已自动启用")
             else:
                 self._log("[电源] ⚠️ API 防睡眠启用失败")
             
@@ -1645,19 +1650,17 @@ class AutoCheckInGUI:
         # 7. 重置停止标志
         self.stop_timer_flag = False 
 
-    def _wait_for_desktop_ready(self, timeout=20):
+    def _wait_for_desktop_ready(self, timeout=30): 
         """
         等待桌面完全就绪（终极稳定版）。
-        策略：
-        1. 强制等待锁屏界面消失（基于窗口类名和标题的双重验证）。
-        2. 确认 Explorer 进程不仅存在，而且其主窗口（Shell_TrayWnd）已创建并可交互。
-        3. 增加额外的“稳固期”，确保动画结束。
         """
         import 亮屏进入桌面 as unlock_module
         
         start_time = time.time()
         last_log_time = 0
         
+        self._log("[桌面检测] 开始严格等待解锁...")
+
         while time.time() - start_time < timeout:
             # 1. 响应用户的中断请求
             if self.stop_timer_flag:
@@ -1665,63 +1668,27 @@ class AutoCheckInGUI:
                 
             current_time = time.time()
             
-            # 2. 严格检查锁屏状态
-            # 注意：is_lock_screen_active 在某些唤醒瞬间可能返回 False，我们需要更保守的策略
+            # 2. 【核心修改】直接使用严格的 is_really_unlocked 检查
             try:
-                is_locked = unlock_module.is_lock_screen_active()
-                
-                # 如果检测到锁屏，继续等待
-                if is_locked:
+                # 调用新定义的严格检查
+                is_unlocked = unlock_module.is_really_unlocked()
+
+                if not is_unlocked:
                     if current_time - last_log_time > 2:
-                        self._log("[桌面检测] 仍处于锁屏/登录界面，等待中...")
+                        self._log("[桌面检测] 仍处于锁屏/登录界面或任务栏未加载，等待中...")
                         last_log_time = current_time
                     time.sleep(0.5)
                     continue
                 
             except Exception as e:
-                self._log(f"[桌面检测] 锁屏状态检测异常: {e}")
+                self._log(f"[桌面检测] 状态检测异常: {e}")
                 time.sleep(0.5)
                 continue
 
-            # 3. 【关键增强】即使 is_lock_screen_active 返回 False，也要确认 Shell_TrayWnd (任务栏) 已就绪
-            # 因为有时候锁屏消失了，但任务栏还没加载出来，此时启动小程序容易失败
-            try:
-                # 查找任务栏窗口
-                hwnd_taskbar = ctypes.windll.user32.FindWindowW("Shell_TrayWnd", None)
-                if not hwnd_taskbar:
-                    if current_time - last_log_time > 2:
-                        self._log("[桌面检测] 锁屏已解，但任务栏尚未加载，等待中...")
-                        last_log_time = current_time
-                    time.sleep(0.5)
-                    continue
-                
-                # 检查任务栏是否可见且启用
-                if not ctypes.windll.user32.IsWindowVisible(hwnd_taskbar):
-                     time.sleep(0.5)
-                     continue
-
-            except Exception as e:
-                pass
-
-            # 4. 【双重保险】再次确认没有锁屏窗口干扰
-            # 防止 IsWindowVisible 判断过快，再进行一次类名检查
-            try:
-                hwnd_foreground = ctypes.windll.user32.GetForegroundWindow()
-                if hwnd_foreground:
-                    class_name_buff = ctypes.create_unicode_buffer(256)
-                    ctypes.windll.user32.GetClassNameW(hwnd_foreground, class_name_buff, 256)
-                    class_name = class_name_buff.value.lower()
-                    # 如果前台窗口仍然是锁屏相关类，继续等待
-                    if any(cls in class_name for cls in ["lockapp", "logonui", "windows.ui.core.corewindow"]):
-                        time.sleep(0.5)
-                        continue
-            except:
-                pass
-
-            # 5. 通过所有检查，给予最后的稳固时间
+            # 3. 通过锁屏检查后，给予最后的稳固时间
             # 这一步至关重要，给 Windows 资源管理器最后几百毫秒来注册 UIA 树
             self._log("[桌面检测] 桌面环境已就绪，进行最后稳固...")
-            time.sleep(1.5) 
+            time.sleep(2.0) # ✅ 保持2秒稳固期
             return True
             
         # 超时仍未就绪
@@ -1740,28 +1707,41 @@ class AutoCheckInGUI:
                     import 亮屏进入桌面 as unlock_module
                     
                     # --- 阶段 A: 物理唤醒屏幕 ---
-                    unlock_module.send_mouse_move(1, 0)
-                    time.sleep(0.1)
-                    unlock_module.send_mouse_move(-1, 0)
-                    time.sleep(0.1)
+                    # 移动鼠标是唤醒屏幕最有效的方法之一
+                    unlock_module.send_mouse_move(10, 10) 
+                    time.sleep(0.2)
+                    unlock_module.send_mouse_move(-10, -10)
+                    time.sleep(0.2)
                     
                     # --- 阶段 B: 尝试解除锁屏 (循环重试) ---
-                    max_unlock_attempts = 5
+                    max_unlock_attempts = 8 # 增加尝试次数
                     for i in range(max_unlock_attempts):
                         if self.stop_timer_flag: return 
                         
                         # 检查当前是否还锁着
                         if not unlock_module.is_lock_screen_active():
-                            break # 已解锁，跳出循环
+                            # 即使 isn't lock screen active，也要再确认一下是不是真的桌面
+                            # 防止处于过渡状态
+                            if hasattr(unlock_module, 'is_really_unlocked') and unlock_module.is_really_unlocked():
+                                break 
+                            elif not hasattr(unlock_module, 'is_really_unlocked'):
+                                break # 兼容旧版
+
+                        self._log(f"[系统] 检测到锁屏/未就绪，尝试解锁 ({i+1}/{max_unlock_attempts})...")
                         
-                        self._log(f"[系统] 检测到锁屏，尝试解锁 ({i+1}/{max_unlock_attempts})...")
+                        # 1. 发送 Enter
                         unlock_module.send_key(unlock_module.VK_RETURN, press=True)
                         time.sleep(0.1)
                         unlock_module.send_key(unlock_module.VK_RETURN, press=False)
+                        time.sleep(0.1)
+                        
+                        # 2. 再次激活桌面焦点
                         unlock_module.activate_desktop()
+                        
+                        # 3. 关键：每次尝试后等待稍长时间，给系统反应时间
                         time.sleep(1.5) 
                     else:
-                        # 循环正常结束（未被break），说明尝试了5次仍检测到锁屏
+                        # 循环正常结束（未被break），说明尝试了N次仍检测到锁屏
                         self._log("[警告] 多次尝试后仍检测到锁屏状态，但将继续尝试激活桌面...")
                         unlock_module.activate_desktop()
 
@@ -1788,8 +1768,18 @@ class AutoCheckInGUI:
             enable_notify = "1" if self.enable_wechat_notify.get() else "0"
             close_wechat = "0"
             
-            self._log("[系统] 调用打卡模块...")
+            self._log("[系统] 桌面就绪，准备调用打卡模块...")
             
+            # ✅ 【终极保险】在启动小程序前，再次轻微移动鼠标，确保系统输入焦点活跃
+            # 这有助于解决某些情况下 UIA 树未刷新的问题
+            try:
+                unlock_module.send_mouse_move(1, 1)
+                time.sleep(0.1)
+                unlock_module.send_mouse_move(-1, -1)
+                time.sleep(0.1)
+            except:
+                pass
+
             # ✅ 关键：调用打卡模块
             import 打卡并发消息 as punch_module
             
@@ -2009,9 +1999,10 @@ class AutoCheckInGUI:
             if not messagebox.askyesno("确认", f"是否启动定时打卡？\n下次打卡：{target.strftime('%H:%M')}"):
                 return
         
-        self._log("\n【电源】正在通过 API 阻止系统睡眠...")
-        self.api_sleep_preventer.prevent()
-
+        self._log("\n【电源】正在通过 API 阻止系统睡眠并保持屏幕常亮...")
+        # ✅ 关键修改：传入 True，强制屏幕不关闭
+        self.api_sleep_preventer.prevent(keep_display_on=True) 
+        
         self.config_manager.set("is_timer_enabled", True)
         self.config_manager.save_config()
         self.last_timer_state = True
@@ -2027,17 +2018,25 @@ class AutoCheckInGUI:
     
     def _timer_loop(self, hour, minute):
         last_checked_date = None
-        # ✅ 新增：记录上次执行打卡的时间戳，用于防止短时间内的重复触发
         last_execution_time = 0 
+        
+        # ✅ 新增：用于减少日志刷屏的标记
+        last_skip_reason = None 
+        last_skip_log_time = 0
         
         while not self.is_closing: 
             current_date = datetime.now().strftime("%Y-%m-%d")
+            
+            # ... (原有的日期重置逻辑保持不变) ...
             if last_checked_date != current_date:
                 if self.last_aborted_date and self.last_aborted_date != current_date:
                     self.last_aborted_date = None
                 if self.today_checkin_attempted and self.today_checkin_attempted != current_date:
                     self.today_checkin_attempted = None
                     self._log("[系统] 新的一天，重置打卡状态")
+                
+                # ✅ 新的一天，重置静默标记
+                last_skip_reason = None
                 last_checked_date = current_date
 
             if self.stop_timer_flag:
@@ -2057,9 +2056,9 @@ class AutoCheckInGUI:
                 self._log(f"[定时] 检测到时间变更为 {current_hour:02d}:{current_minute:02d}，重新计算目标时间")
                 self.time_config_changed = False
                 last_checked_date = None # 强制刷新日期逻辑
-                # ✅ 修复：时间变更后，稍微等待一下，让状态稳定，避免立即触发打卡
+                last_skip_reason = None # 重置静默标记
                 time.sleep(1) 
-                continue # 跳过本次循环，重新计算目标
+                continue 
 
             # ✅ 3. 计算目标
             should_checkin_now, target = self._calculate_next_target_and_check_missed(current_hour, current_minute)
@@ -2072,21 +2071,37 @@ class AutoCheckInGUI:
                 # --- 安全检查 A: 是否正在运行？ ---
                 with self.process_lock:
                     if self.is_checkin_running:
+                        # ✅ 优化：如果是因为正在运行而跳过，也使用静默逻辑
+                        if last_skip_reason != "running":
+                            self._log("[定时] 当前已有任务在运行，跳过本次检查")
+                            last_skip_reason = "running"
                         time.sleep(5) 
                         continue
                 
                 # --- 安全检查 B: 今天是否已经打过/试过？ (最高优先级) ---
-                # 包括：正常打过、保存过时间、手动终止过
                 if self.today_checkin_attempted == current_date:
-                    # ✅ 关键：只要今天标记过，无论是否启用补打，无论时间是否错过，都跳过
-                    self._log("[定时] 今日已记录打卡状态（或刚修改过时间），跳过本次检查，等待下一轮")
+                    # ✅ 优化：只有当原因改变，或者距离上次日志超过 10 分钟时，才打印日志
+                    current_time = time.time()
+                    reason = "attempted"
+                    
+                    if last_skip_reason != reason or (current_time - last_skip_log_time > 600):
+                        self._log("[定时] 今日已记录打卡状态，跳过本次检查，等待下一轮")
+                        last_skip_reason = reason
+                        last_skip_log_time = current_time
+                    
                     time.sleep(60) 
                     continue
 
                 # --- 安全检查 C: 用户是否手动终止过？ ---
-                # 注意：手动终止通常也会设置 today_checkin_attempted，但为了保险保留此检查
                 if self.last_aborted_date == current_date:
-                    self._log("[定时] 今日用户曾手动终止，尊重意愿，跳过")
+                    current_time = time.time()
+                    reason = "aborted"
+                    
+                    if last_skip_reason != reason or (current_time - last_skip_log_time > 600):
+                        self._log("[定时] 今日用户曾手动终止，尊重意愿，跳过")
+                        last_skip_reason = reason
+                        last_skip_log_time = current_time
+                        
                     time.sleep(60)
                     continue
 
@@ -2094,14 +2109,17 @@ class AutoCheckInGUI:
                 import time as time_module
                 now_ts = time_module.time()
                 if now_ts - last_execution_time < 60: 
+                     # ✅ 优化：防抖跳过通常不需要日志，或者极少打印
                      time.sleep(5)
                      continue
 
                 # --- 执行逻辑分支 ---
+                # ✅ 如果成功进入这里，说明要执行了，重置静默标记
+                last_skip_reason = None
+                
                 enable_grace = self.config_manager.get("enable_grace_checkin", False)
                 
                 if enable_grace:
-                    # ✅ 只有启用了补打，且通过了以上所有检查，才执行补打
                     self._log("[检测] 时间变更或到达，且启用补打，触发立即打卡逻辑")
                     self._update_status("正在补打卡...", target.strftime("%Y-%m-%d %H:%M:%S"))
                     
@@ -2119,14 +2137,19 @@ class AutoCheckInGUI:
                         with self.process_lock:
                             self.is_checkin_running = False
                 else:
-                    # ✅ 未启用补打：时间已过，直接跳过，等待明天
                     self._log("[定时] 时间已过且未启用补打，跳过今日，等待明天")
+                    self.today_checkin_attempted = current_date
+                    last_skip_reason = "attempted" # ✅ 改为 attempted，与下一个分支保持一致
+                    last_skip_log_time = time.time() # ✅ 更新时间，防止立即再次打印
                     time.sleep(60)
                     continue
                 
                 continue # 执行完补打后，继续下一次循环
 
             # 5. 正常等待逻辑
+            # ✅ 如果进入正常等待，说明没有跳过，重置标记
+            last_skip_reason = None
+            
             now = datetime.now()
             delay = (target - now).total_seconds()
             if delay < 0: delay = 1
@@ -2135,7 +2158,7 @@ class AutoCheckInGUI:
             step = 1 
             while elapsed < delay:
                 if self.stop_timer_flag or self.is_closing: break 
-                if self.time_config_changed: break # 时间变了，提前醒来
+                if self.time_config_changed: break 
                 time.sleep(step)
                 elapsed += step
             
@@ -2143,18 +2166,16 @@ class AutoCheckInGUI:
             if self.stop_timer_flag: continue
             
             # 6. 准时触发前的最后检查
-            # ✅ 关键修复：使用锁保护 is_checkin_running 的检查和设置
             with self.process_lock:
                 if self.is_checkin_running:
                     self._log("[定时] 到达预定时间，但当前已有任务在运行，跳过")
                     continue
-                # 立即标记为运行，阻止其他分支进入
                 self.is_checkin_running = True
 
             self._log("[定时] 到达预定时间，开始执行打卡")
             self._update_status("正在打卡...")
             
-            last_execution_time = time.time() # 记录执行时间
+            last_execution_time = time.time() 
             self.root.after(0, lambda: self._toggle_immediate_button(to_terminate_mode=True))
             
             try:

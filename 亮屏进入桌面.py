@@ -147,6 +147,81 @@ def is_desktop_ready():
     except Exception:
         return True   # 检测失败时默认就绪，避免死等
 
+# 在 亮屏进入桌面.py 中更新 is_desktop_ready 或新增一个更严格的检查
+
+def is_really_unlocked():
+    """
+    严格检测是否真正解锁进入桌面。
+    """
+    try:
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        if not hwnd:
+            return False
+        
+        class_name_buff = ctypes.create_unicode_buffer(256)
+        ctypes.windll.user32.GetClassNameW(hwnd, class_name_buff, 256)
+        class_name = class_name_buff.value.lower()
+        
+        # 1. 黑名单检查
+        lock_classes = [
+            "lockapp", "logonui", "windows.ui.core.corewindow", 
+            "credentialproviderwrapper", "winlogon"
+        ]
+        
+        if any(cls in class_name for cls in lock_classes):
+            return False
+            
+        # 2. 标题检查
+        length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+        if length > 0:
+            title_buff = ctypes.create_unicode_buffer(length + 1)
+            ctypes.windll.user32.GetWindowTextW(hwnd, title_buff, length + 1)
+            title = title_buff.value.lower()
+            if "lock" in title or "logon" in title or "sign in" in title:
+                return False
+
+        # 3. 【增强】检查任务栏是否存在且可见
+        hwnd_taskbar = ctypes.windll.user32.FindWindowW("Shell_TrayWnd", None)
+        if hwnd_taskbar:
+            # 确保任务栏是可见的，防止资源管理器重启瞬间的假死
+            if ctypes.windll.user32.IsWindowVisible(hwnd_taskbar):
+                return True
+            
+        # 如果前台不是锁屏，但任务栏还没出来，可能是过渡状态，返回 False 继续等
+        return False
+
+    except Exception:
+        return False
+
+def is_explorer_running():
+    """单独提取 Explorer 检查逻辑（保留作为备用，但不再作为解锁的唯一标准）"""
+    try:
+        handle = ctypes.windll.kernel32.CreateToolhelp32Snapshot(2, 0)
+        if handle == -1:
+            return False
+        class PROCESSENTRY32(ctypes.Structure):
+            _fields_ = [("dwSize", ctypes.c_ulong), ("cntUsage", ctypes.c_ulong),
+                        ("th32ProcessID", ctypes.c_ulong), ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+                        ("th32ModuleID", ctypes.c_ulong), ("cntThreads", ctypes.c_ulong),
+                        ("th32ParentProcessID", ctypes.c_ulong), ("pcPriClassBase", ctypes.c_long),
+                        ("dwFlags", ctypes.c_ulong), ("szExeFile", ctypes.c_char * 260)]
+        pe32 = PROCESSENTRY32()
+        pe32.dwSize = ctypes.sizeof(PROCESSENTRY32)
+        found = False
+        if ctypes.windll.kernel32.Process32First(handle, ctypes.byref(pe32)):
+            while True:
+                try:
+                    if pe32.szExeFile.decode('gbk', errors='ignore').lower() == 'explorer.exe':
+                        found = True
+                        break
+                except:
+                    pass
+                if not ctypes.windll.kernel32.Process32Next(handle, ctypes.byref(pe32)):
+                    break
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return found
+    except:
+        return True
 def is_lock_screen_active():
     """
     检测当前是否处于锁屏状态
